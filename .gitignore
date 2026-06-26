@@ -1,0 +1,40 @@
+# ─── 环境 ───
+.env
+.env.*
+!.env.example
+
+# ─── Python ───
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+
+# ─── IDE ───
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ─── 项目生成文件 ───
+outputs/parsed/pages/
+outputs/parsed/*_images/
+
+# ─── 大文件 / 原始数据 ───
+data/raw/*.pdf
+data/raw/*.png
+data/raw/*.jpg
+data/raw/*.jpeg
+
+# ─── 系统 ───
+*.log

@@ -1,0 +1,464 @@
+DeepSeek+LangGraph构建企业级多模态RAG：从PDF复杂解析到Agentic智能检索全流程实战
+
+摘要 ：
+
+传统的文本RAG（检索增强生成）在面对包含复杂表格、图片和多栏排版的PDF文档时往往力不从心。本文将带你从零开始，基于 Unstructured + PaddleOCR 实现"结构解析重建法"，将复杂的PDF逆向转化为高质量的Markdown文档；并结合 DeepSeek 大模型与 LangGraph 智能体框架，构建一个具备自我修正能力的 Agentic RAG 引擎。本文包含完整的环境配置、核心代码实现及架构原理解析。
+
+1. 引言：RAG系统的"最后一公里"难题
+随着大模型（LLM）技术的普及，RAG（检索增强生成）已成为企业知识库落地的主流方案。然而，在实际开发中，开发者往往会撞上一堵墙：数据清洗。
+
+企业内部存在大量 PDF 文档，这些文档不仅仅是纯文本，还包含了：
+
+跨页的表格
+
+复杂的流程图与截图
+
+多栏排版与页眉页脚
+
+传统的 PyPDF2 或简单的 OCR 方案只能提取出破碎的文本流，丢失了文档的结构信息（如标题层级、表格对应的行列关系）。这种"垃圾进（Garbage In）"必然导致"垃圾出（Garbage Out）"，使得 LLM 无法回答基于表格数据或图片内容的问题。
+
+本文将介绍一种工业级 的解决方案：结构解析重建法，并结合最新的 Agentic RAG 理念，打造一个真正好用的多模态检索系统。
+
+2. 技术架构与核心思路
+2.1 什么是"结构解析重建法"？
+所谓"结构解析重建"，本质上是对原始 PDF 文档进行分层解析，将其中的 标题、段落、表格、图片、公式 等元素逐一抽取，并依据其在文档中的位置和语义关系重新组织，最终转化为一种适合 LLM 理解的结构化格式------Markdown。
+
+Markdown 天然支持标题层级（#）、表格（|---|）、图片引用（!\[\]）和代码块，是 RAG 系统最理想的中间格式。
+
+2.2 技术栈选型
+文档解析：Unstructured（基于 Layout 解析的框架） + PaddleOCR（百度开源的高精度中文 OCR）。
+
+向量存储：FAISS + OpenAI Embedding（兼容 DeepSeek 等模型）。
+
+编排框架：LangChain + LangGraph（构建有状态的循环智能体）。
+
+大模型：DeepSeek-V3（高性价比，推理能力强）。
+
+3. 第一阶段：开发环境搭建
+由于涉及 OCR 和图像处理，环境配置是成功的一半。以下演示基于 Windows/Linux 通用的配置流程。
+
+3.1 Python环境与虚拟环境
+建议使用 Python 3.10 或 3.11。
+
+bash
+复制代码
+# 使用 conda 创建隔离环境
+conda create -n pdf_rag python=3.10 -y
+conda activate pdf_rag
+3.2 核心依赖库安装
+我们需要安装 Unstructured 的全套文档支持、OCR 引擎以及 LangChain 生态库。
+
+bash
+复制代码
+# 1. 基础文档解析库 (支持 PDF/Word/PPT 等)
+pip install "unstructured[all-docs]"
+
+# 2. OCR 引擎 (PaddleOCR 对中文支持极佳)
+pip install paddlenlp paddleocr
+
+# 3. PDF 处理与图像库
+pip install PyMuPDF pillow matplotlib html2text
+
+# 4. LangChain 与 RAG 全家桶
+pip install langchain-core langchain-community langchain-text-splitters 
+pip install langchain-openai langchain-deepseek faiss-cpu
+pip install langgraph langsmith
+安装避坑指南：
+
+Windows 用户：如果安装 PaddleOCR 时报错，通常是因为缺少 Visual C++ 运行库，请前往微软官网下载并安装 C++ Build Tools。
+
+模型下载：首次运行 PaddleOCR 时会自动下载检测和识别模型，请确保网络通畅。
+
+4. 第二阶段：多模态PDF深度解析（核心）
+这一部分是整个系统的基石。我们将把一个非结构化的 PDF 变成结构化的 Element 对象。
+
+4.1 初始化 UnstructuredLoader
+我们使用 UnstructuredLoader 的 hi_res（高分辨率）模式，结合 PaddleOCR 进行处理。
+
+python
+复制代码
+from langchain_unstructured import UnstructuredLoader
+
+file_path = "data/My_Complex_Document.pdf"  # 替换为你的文件路径
+
+loader_local = UnstructuredLoader(
+    file_path=file_path,
+    strategy="hi_res",              # 关键：启用高分辨率模式，进行版面分析
+    infer_table_structure=True,     # 关键：自动将表格解析为 HTML/结构化数据
+    ocr_languages="chi_sim+eng",    # 启用中英文 OCR
+    ocr_engine="paddleocr"          # 指定使用 PaddleOCR
+)
+
+docs_local = []
+print("开始解析 PDF，这可能需要几分钟...")
+for doc in loader_local.lazy_load():
+    docs_local.append(doc)
+
+print(f"解析完成，共提取 {len(docs_local)} 个元素。")
+此时，docs_local 中的每个对象都包含了：
+
+page_content: 文本内容
+
+metadata: 包含坐标（coordinates）、页码（page_number）、元素类别（category，如 Title, Table, Image）等。
+
+4.2 元素提取与可视化验证
+为了确认解析是否准确（有没有把表格切碎，有没有把标题识别成正文），我们可以编写一个可视化函数，将识别框绘制在 PDF 图片上。
+
+python
+复制代码
+import fitz  # PyMuPDF
+import matplotlib.patches as patches
+import matplotlib.pyplot as plt
+from PIL import Image
+
+def plot_pdf_with_boxes(pdf_page, segments):
+    """在PDF页面上绘制元素识别框"""
+    pix = pdf_page.get_pixmap()
+    pil_image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+    fig, ax = plt.subplots(1, figsize=(10, 10))
+    ax.imshow(pil_image)
+    
+    # 定义不同类别的颜色
+    category_to_color = {
+        "Title": "orchid",
+        "Image": "forestgreen",
+        "Table": "tomato",
+        "NarrativeText": "deepskyblue"
+    }
+
+    for segment in segments:
+        # 获取坐标并进行比例换算
+        points = segment["coordinates"]["points"]
+        layout_w = segment["coordinates"]["layout_width"]
+        layout_h = segment["coordinates"]["layout_height"]
+        
+        scaled_points = [
+            (x * pix.width / layout_w, y * pix.height / layout_h)
+            for x, y in points
+        ]
+        
+        cat = segment["category"]
+        box_color = category_to_color.get(cat, "gray")
+        
+        # 绘制多边形框
+        rect = patches.Polygon(
+            scaled_points, linewidth=1, edgecolor=box_color, facecolor="none"
+        )
+        ax.add_patch(rect)
+        
+        # 添加标签（可选）
+        # ax.text(scaled_points[0][0], scaled_points[0][1], cat, color=box_color, fontsize=8)
+
+    plt.axis("off")
+    plt.show()
+
+# 调用示例：渲染第1页
+page_num = 1
+pdf_doc = fitz.open(file_path)
+page_segments = [d.metadata for d in docs_local if d.metadata.get("page_number") == page_num]
+plot_pdf_with_boxes(pdf_doc.load_page(page_num - 1), page_segments)
+4.3 逆向工程：将PDF重组为Markdown
+这是本文最精华的部分。我们将利用 fitz 提取高、清图片，利用 Unstructured 提取文本结构，最后拼接成一个完整的 Markdown 文件。
+
+python
+复制代码
+import os
+import fitz
+from unstructured.partition.pdf import partition_pdf
+
+# 配置路径
+pdf_path = "data/My_Complex_Document.pdf"
+output_dir = "output_images"
+os.makedirs(output_dir, exist_ok=True)
+
+# Step 1: 再次调用底层分区函数获取详细 Elements (如果上面已经加载过，可直接复用逻辑)
+print("正在执行版面分析...")
+elements = partition_pdf(
+    filename=pdf_path,
+    infer_table_structure=True,
+    strategy="hi_res",
+    ocr_languages="chi_sim+eng",
+    ocr_engine="paddleocr"
+)
+
+# Step 2: 使用 PyMuPDF 提取并保存所有图片
+print("正在提取图片资源...")
+doc = fitz.open(pdf_path)
+image_map = {}  # 记录每一页对应的图片路径列表
+
+for page_index, page in enumerate(doc, start=1):
+    image_map[page_index] = []
+    # get_images(full=True) 获取页面内所有图片引用
+    for img_idx, img in enumerate(page.get_images(full=True), start=1):
+        xref = img[0]
+        pix = fitz.Pixmap(doc, xref)
+        
+        # 处理 CMYK 转 RGB
+        if pix.n >= 5: 
+            pix = fitz.Pixmap(fitz.csRGB, pix)
+            
+        img_filename = f"page{page_index}_img{img_idx}.png"
+        img_path = os.path.join(output_dir, img_filename)
+        pix.save(img_path)
+        
+        image_map[page_index].append(img_path)
+
+# Step 3: 智能组装 Markdown
+print("正在生成 Markdown...")
+md_lines = []
+inserted_images = set()  # 去重集合
+
+for el in elements:
+    cat = el.category
+    text = el.text
+    page_num = el.metadata.page_number
+    
+    # 3.1 处理标题
+    if cat == "Title":
+        # 有些列表项会被误识别为标题，做一个简单的过滤
+        if text.strip().startswith("- "):
+            md_lines.append(text + "\n")
+        else:
+            md_lines.append(f"# {text}\n")
+            
+    # 3.2 处理副标题
+    elif cat in ["Header", "Subheader"]:
+        md_lines.append(f"## {text}\n")
+        
+    # 3.3 处理表格 (核心：使用HTML转Markdown)
+    elif cat == "Table":
+        if hasattr(el.metadata, "text_as_html") and el.metadata.text_as_html:
+            from html2text import html2text
+            # 将表格 HTML 转换为干净的 Markdown 表格
+            md_table = html2text(el.metadata.text_as_html)
+            md_lines.append(md_table + "\n")
+        else:
+            md_lines.append(text + "\n") // 降级为纯文本
+            
+    # 3.4 处理图片插入
+    elif cat == "Image":
+        # 查找当前页的图片资源
+        current_page_imgs = image_map.get(page_num, [])
+        # 简单策略：如果该位置识别到了Image元素，我们将该页未插入过的图片按顺序插入
+        # (更精细的策略是对比坐标重叠度，但此处简化处理)
+        for img_path in current_page_imgs:
+            if img_path not in inserted_images:
+                md_lines.append(f"![Image](./{img_path})\n")
+                inserted_images.add(img_path)
+                
+    # 3.5 普通文本
+    else:
+        md_lines.append(text + "\n")
+
+# Step 4: 保存结果
+output_md = "knowledge_base.md"
+with open(output_md, "w", encoding="utf-8") as f:
+    f.write("\n".join(md_lines))
+
+print(f"✅ 转换成功！Markdown已保存至: {output_md}")
+运行结束后，你将得到一个图文并茂、表格结构清晰的 Markdown 文件。
+
+5. 第三阶段：构建向量知识库
+有了高质量的 Markdown，构建向量库就变得简单且高效了。我们将使用 MarkdownHeaderTextSplitter 来按章节切分，这样可以最大限度保留上下文语义。
+
+python
+复制代码
+import os
+from langchain_openai import OpenAIEmbeddings
+from langchain_text_splitters import MarkdownHeaderTextSplitter
+from langchain_community.vectorstores import FAISS
+
+# 配置环境变量 (使用 DeepSeek 或 OpenAI 兼容接口)
+# os.environ["OPENAI_API_KEY"] = "sk-xxxx" 
+# os.environ["OPENAI_BASE_URL"] = "https://api.deepseek.com" 
+
+# 1. 初始化 Embedding 模型
+embed_model = OpenAIEmbeddings(
+    model="text-embedding-3-small", # 或其他兼容模型
+    # 如果使用第三方模型，请配置 base_url 和 api_key
+)
+
+# 2. 读取 Markdown
+with open("knowledge_base.md", "r", encoding="utf-8") as f:
+    md_content = f.read()
+
+# 3. 语义切分
+# 定义切分符：按一级和二级标题切分，保留层级结构作为元数据
+headers_to_split_on = [
+    ("#", "Header 1"),
+    ("##", "Header 2"),
+    ("###", "Header 3"),
+]
+
+markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on)
+md_splits = markdown_splitter.split_text(md_content)
+
+print(f"文档已切分为 {len(md_splits)} 个片段。")
+
+# 4. 向量化并保存 (建立索引)
+vector_store = FAISS.from_documents(md_splits, embedding=embed_model)
+vector_store.save_local("my_rag_index")
+
+print("✅ 向量数据库构建完成。")
+6. 第四阶段：基于 LangGraph 的 Agentic RAG 开发
+传统的 RAG 是一条直线：检索 -> 生成。如果检索结果不好，系统就瞎编。
+Agentic RAG（代理式RAG） 是一个闭环：检索 -> 评分(相关性检测) -> (如果不相关)重写问题 -> 重新检索 -> 生成。
+
+我们将使用 LangGraph 来实现这个智能工作流。
+
+6.1 初始化模型与工具
+python
+复制代码
+import os
+from typing import Literal
+from langgraph.graph import MessagesState, StateGraph, START, END
+from langgraph.prebuilt import ToolNode
+from langchain.chat_models import init_chat_model
+from langchain.tools.retriever import create_retriever_tool
+from langchain_community.vectorstores import FAISS
+from langchain_openai import OpenAIEmbeddings
+from pydantic import BaseModel, Field
+
+# 加载向量库
+embed = OpenAIEmbeddings(model="text-embedding-3-small")
+vector_store = FAISS.load_local("my_rag_index", embeddings=embed, allow_dangerous_deserialization=True)
+
+# 创建检索工具
+retriever = vector_store.as_retriever(search_kwargs={"k": 3})
+retriever_tool = create_retriever_tool(
+    retriever,
+    name="retrieve_docs",
+    description="搜索并返回知识库中的相关文档片段。",
+)
+
+# 初始化 DeepSeek 模型
+MODEL_NAME = "deepseek-chat"
+llm = init_chat_model(model=MODEL_NAME, model_provider="deepseek", temperature=0)
+6.2 定义核心逻辑节点
+我们需要定义三个核心 Agent 动作：
+
+Grade (打分员)：判断检索到的文档是否有用。
+
+Rewrite (改写员)：如果文档没用，重写用户问题。
+
+Generate (生成员)：根据文档回答问题。
+
+python
+复制代码
+# --- 结构化输出定义 ---
+class GradeDoc(BaseModel):
+    """文档相关性评分"""
+    binary_score: str = Field(description="文档是否与问题相关，'yes' 或 'no'")
+
+# --- 节点函数 ---
+
+async def generate_query_or_respond(state: MessagesState):
+    """决策节点：直接回答还是调用工具检索？"""
+    # 绑定工具，让模型自己决定是否需要查库
+    response = await llm.bind_tools([retriever_tool]).ainvoke(state["messages"])
+    return {"messages": [response]}
+
+async def grade_documents(state: MessagesState) -> Literal["generate_answer", "rewrite_question"]:
+    """评分节点：决定下一步是生成答案还是重写问题"""
+    question = state["messages"][0].content
+    # 获取检索结果（通常是工具调用的输出）
+    tool_messages = [m for m in state["messages"] if m.type == "tool"]
+    if not tool_messages:
+        return "generate_answer" # 没有调用工具，可能是闲聊，直接生成
+        
+    context = tool_messages[-1].content
+    
+    # 使用 LLM 进行二分类判断
+    grade_prompt = f"""
+    你是一个文档评估员。请判断以下检索到的文档是否包含回答用户问题所需的信息。
+    文档内容: {context}
+    用户问题: {question}
+    请仅返回 'yes' 或 'no'。
+    """
+    grader = llm.with_structured_output(GradeDoc)
+    result = await grader.ainvoke([{"role": "user", "content": grade_prompt}])
+    
+    if result.binary_score.lower().startswith("y"):
+        return "generate_answer"
+    else:
+        return "rewrite_question"
+
+async def rewrite_question(state: MessagesState):
+    """重写节点：优化查询语句"""
+    question = state["messages"][0].content
+    msg = [
+        {"role": "system", "content": "你是一个提示词专家。请重写用户的问题，使其更容易被向量数据库检索到，聚焦于关键词。"},
+        {"role": "user", "content": f"原问题: {question}"}
+    ]
+    response = await llm.ainvoke(msg)
+    # 用重写后的问题更新对话状态，引导下一次检索
+    return {"messages": [{"role": "user", "content": response.content}]}
+
+async def generate_answer(state: MessagesState):
+    """生成节点：最终回复"""
+    # 这里可以添加更复杂的 System Prompt
+    response = await llm.ainvoke(state["messages"])
+    return {"messages": [response]}
+6.3 构建图架构 (Graph)
+将上述节点连接起来，形成工作流。
+
+python
+复制代码
+workflow = StateGraph(MessagesState)
+
+# 1. 添加节点
+workflow.add_node("decision_maker", generate_query_or_respond)
+workflow.add_node("retrieve_tool", ToolNode([retriever_tool]))
+workflow.add_node("rewriter", rewrite_question)
+workflow.add_node("answer_generator", generate_answer)
+
+# 2. 定义边 (Edge)
+workflow.add_edge(START, "decision_maker")
+
+# 决策节点的逻辑：如果模型决定调用工具 -> 进 retrieve_tool，否则 -> 直接结束
+def route_tool_trigger(state: MessagesState):
+    last_msg = state["messages"][-1]
+    if last_msg.tool_calls:
+        return "retrieve_tool"
+    return "answer_generator"
+
+workflow.add_conditional_edges("decision_maker", route_tool_trigger)
+
+# 检索后的逻辑：进行评分
+workflow.add_conditional_edges("retrieve_tool", grade_documents)
+
+# 评分后的分支已经在 grade_documents 函数的返回值中定义了
+# "rewrite_question" -> rewriter
+# "generate_answer" -> answer_generator
+
+workflow.add_edge("rewriter", "decision_maker") # 重写后，重新决策（再次检索）
+workflow.add_edge("answer_generator", END)
+
+# 3. 编译图
+rag_app = workflow.compile()
+
+# 4. 运行测试
+import asyncio
+
+async def main():
+    inputs = {"messages": [{"role": "user", "content": "请总结知识库中关于多模态解析的三个步骤"}]}
+    async for output in rag_app.astream(inputs):
+        for key, value in output.items():
+            print(f"--- Node: {key} ---")
+            # print(value) # 打印详细日志
+
+if __name__ == "__main__":
+    asyncio.run(main())
+7. 总结与展望
+通过本文的实战，我们成功搭建了一套企业级的多模态 RAG 系统。
+
+数据层：利用 Unstructured + PaddleOCR 攻克了 PDF 结构化难题，将"死"的 PDF 变成了"活"的 Markdown。
+
+存储层：利用 MarkdownHeaderTextSplitter 实现了基于语义的精准切分。
+
+认知层 ：利用 DeepSeek + LangGraph 构建了具备反思能力的 Agent，解决了传统 RAG"查不到乱回答"的问题。
+
+未来优化方向：
+
+多模态 Embedding：目前我们只是将图片路径存入 Markdown，未来可以使用 CLIP 或 SigLIP 模型直接对图片进行向量化，实现"以文搜图"。

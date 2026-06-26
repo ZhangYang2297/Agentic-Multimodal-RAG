@@ -1,0 +1,13 @@
+{
+  "iter": "A2",
+  "pdf": "data/raw/sample.pdf",
+  "step1_time_sec": 1.5,
+  "step2_time_sec": 31.38,
+  "total_pages": 15,
+  "total_tokens": 62796,
+  "avg_tokens_per_page": 4186.4,
+  "md_output": "outputs/parsed/document.md",
+  "md_size_bytes": 8951,
+  "md_line_count": 322,
+  "all_checks_passed": true
+}
