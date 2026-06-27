@@ -115,7 +115,7 @@ Agentic-Multimodal-RAG/
 | **融合算法** | RRF（Reciprocal Rank Fusion） | 不依赖分数归一化 |
 | **重排序** | BGE-reranker-v2-m3（SiliconFlow API） | 精度提升关键，阈值 0.9 |
 | **Agent 框架** | LangGraph | 支持循环 + 状态机 |
-| **LLM** | qwen / deepseek（DashScope，可配置） | 快/默认/强三档分工 |
+| **LLM** | qwen / deepseek（DashScope 主）+ doubao / deepseek / glm（火山方舟备） | 快/默认/强三档分工 + 双后端降级 |
 
 ## 当前进展
 
@@ -151,8 +151,12 @@ Agentic-Multimodal-RAG/
 | `SILICONFLOW_API_KEY` | BGE-M3 Embedding + BGE-reranker-v2-m3 | [SiliconFlow 控制台](https://cloud.siliconflow.cn) |
 | `DASHSCOPE_API_KEY` | qwen-ocr + Agent LLM（阿里云百炼） | [百炼平台](https://bailian.console.aliyun.com/) |
 | `OCR-TOKEN` | PaddleOCR-VL（百度，可选） | [AI Studio](https://aistudio.baidu.com) |
+| `ARK_API_KEY` | Agent LLM 备用后端（火山引擎方舟，主后端故障时降级） | [火山方舟控制台](https://console.volcengine.com/ark) |
 
-可选覆盖 Agent 模型（默认见下）：`AGENT_FAST_MODEL`、`AGENT_MODEL`、`AGENT_STRONG_MODEL`。
+可选覆盖 Agent 行为（均有默认值）：
+- 模型：`AGENT_FAST_MODEL` / `AGENT_MODEL` / `AGENT_STRONG_MODEL`（DashScope）、`ARK_FAST_MODEL` / `ARK_MODEL` / `ARK_STRONG_MODEL`（ARK）
+- 超时：`AGENT_TIMEOUT_FAST=15` / `AGENT_TIMEOUT_DEFAULT=20` / `AGENT_TIMEOUT_STRONG=25`（秒）
+- 重试/熔断：`AGENT_MAX_RETRIES=2`、`AGENT_CIRCUIT_WINDOW=20`、`AGENT_CIRCUIT_ERROR_RATE=0.5`、`AGENT_CIRCUIT_COOLDOWN=60`
 
 ### 设置方式
 
@@ -199,7 +203,8 @@ python tests/test_bm25_deprecate.py        # BM25 分词 + deprecate
 - **检索组件线程安全**：最小必要加锁——只锁有竞争的写路径，不锁无状态转发层和读路径。
 - **检索阈值设计**：dense/bm25 0.5、rerank 0.9 两层过滤，逐步从 0.3 收紧到 0.9 并经测试验证。
 - **环境适配**：ChromaDB Windows 文件锁、PowerShell GBK 编码、用户级环境变量作用域。
-- **Agent 鲁棒性**：三层兜底（节点 try/except + 流程重试上限 + 拒答 fallback）+ 后端熔断器，保证流程必收敛、不抛异常给用户。
+- **Agent 鲁棒性**：三层兜底（节点 try/except + 流程重试上限 + 拒答 fallback）+ 双后端降级（DashScope → 火山方舟 ARK）+ 滑动窗口错误率熔断（含 half-open 探测），保证流程必收敛、不抛异常给用户。
+- **可重试错误分类**：只对 429/5xx/超时/网络退避重试（带 jitter），4xx 等确定性失败立即切后端，不空烧 token。
 - **模型路由解决超时**：评估/改写等高频轻量节点用 flash 小模型、关闭深度思考，回答/兜底才用强模型，端到端延迟从 1 分多压到十几秒。
 
 ## 许可
