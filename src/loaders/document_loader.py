@@ -8,6 +8,7 @@ B1: 多格式统一加载器
 import os
 from pathlib import Path
 from typing import Literal
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 # 支持的文件类型
@@ -72,35 +73,67 @@ def load_documents_batch(
     file_paths: list,
     ocr_engine: str = "auto",
     clean_markdown: bool = True,
+    max_workers: int = 4,
 ) -> list:
     """
-    批量加载文档
+    批量加载文档（ThreadPoolExecutor 并行）
+
+    为什么用线程池：
+      - OCR/Embedding 是 I/O 密集型，线程并行有效
+      - 单文档失败不影响其他文档
+      - 清洗/分块 < 100ms，不是瓶颈
+
+    参数:
+        file_paths:     文件路径列表
+        ocr_engine:     OCR 引擎（auto/qwen/paddle_vl）
+        clean_markdown: 是否清洗
+        max_workers:    并行线程数（默认 4，与 PROJECT.md 一致）
 
     返回:
-        [{"path": ..., "content": ..., "ext": ..., "size": ...}, ...]
+        [{"path": ..., "content": ..., "ext": ..., "size": ..., "success": ...}, ...]
     """
     results = []
-    for fp in file_paths:
-        ext = detect_format(fp)
-        try:
-            content = load_document(fp, ocr_engine=ocr_engine, clean_markdown=clean_markdown)
-            results.append({
-                "path": fp,
-                "content": content,
-                "ext": ext,
-                "size": len(content),
-                "success": True,
-            })
-        except Exception as e:
-            results.append({
-                "path": fp,
-                "content": None,
-                "ext": ext,
-                "size": 0,
-                "success": False,
-                "error": str(e),
-            })
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {}
+        for fp in file_paths:
+            future = executor.submit(
+                _load_single, fp,
+                ocr_engine=ocr_engine,
+                clean_markdown=clean_markdown,
+            )
+            future_map[future] = fp
+
+        for future in as_completed(future_map):
+            fp = future_map[future]
+            try:
+                result = future.result()
+                results.append(result)
+            except Exception as e:
+                results.append({
+                    "path": fp,
+                    "content": None,
+                    "ext": detect_format(fp),
+                    "size": 0,
+                    "success": False,
+                    "error": str(e),
+                })
+
+    # 按原始顺序排序
+    order = {fp: i for i, fp in enumerate(file_paths)}
+    results.sort(key=lambda r: order.get(r["path"], 999))
     return results
+
+
+def _load_single(file_path: str, ocr_engine: str = "auto", clean_markdown: bool = True) -> dict:
+    """单个文档加载（供线程池调用）"""
+    content = load_document(file_path, ocr_engine=ocr_engine, clean_markdown=clean_markdown)
+    return {
+        "path": file_path,
+        "content": content,
+        "ext": detect_format(file_path),
+        "size": len(content),
+        "success": True,
+    }
 
 
 if __name__ == "__main__":

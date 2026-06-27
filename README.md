@@ -1,204 +1,205 @@
 # Agentic Multimodal RAG
 
-> 基于 **LangGraph + Agentic RAG** 构建的多模态智能旅游助理，具备自主检索决策与多轮反思能力。
+> 基于 **LangGraph + Agentic RAG** 构建的多模态智能旅游助理，具备自主检索决策、检索质量自评与多轮改写重试能力。
 
-## 📌 项目概述
+## 项目概述
 
-本项目实现了一个**多模态 Agentic RAG 系统**，能够接受文本和图片混合输入，自动解析复杂 PDF 文档（含表格、图片、多栏布局），通过 Agent 自主决定是否检索、检索几次，并对检索结果进行质量自评与自动改写重试。
+本项目实现了一个**多模态 Agentic RAG 系统**，面向"国内旅游攻略"知识库场景：自动解析复杂 PDF（含表格、图片、多栏布局），构建可持久化的混合检索引擎，并由 LangGraph Agent 自主决定是否检索、检索结果是否足够、需不需要改写问题重试或拒答。
+
+与传统"一次检索 + 直接生成"的 RAG 不同，本系统的核心是 **Agent 闭环**：
+
+```
+检索 → LLM 自评 → 不足则改写重试 → 仍不足则拒答兜底 → 足够则生成答案
+```
 
 ### 核心能力
 
 - **多格式文档解析**：PDF / Markdown / TXT 统一加载
-- **OCR 引擎**：支持 qwen3.5-ocr（百炼 API）和 PaddleOCR-VL 双引擎切换
-- **智能清洗**：通用文本清洗 + Markdown 专项清洗
-- **语义切分**：（开发中）按标题分级的 MarkdownHeaderTextSplitter
-- **向量检索**：（开发中）BGE Embedding + Chroma 向量库
-- **Agent 编排**：（开发中）LangGraph 驱动的搜索/推理/反馈 Agent
+- **OCR 引擎**：qwen-ocr（阿里云百炼 API）为主、PaddleOCR-VL 备用，统一接口可切换
+- **智能清洗 + 语义切分**：通用文本清洗 + Markdown 专项清洗，按标题层级 / 递归段落切分
+- **混合检索**：BGE-M3 稠密向量（ChromaDB）+ BM25（SQLite FTS5）+ RRF 融合 + BGE-reranker 重排序
+- **全链路持久化**：向量库、BM25 索引、文档注册中心均落盘，进程重启不丢失，支持增量更新与版本 deprecate
+- **Agentic 编排**：LangGraph 状态机驱动 Search / Evaluate / Rewrite / Answer / Fallback 五节点闭环
+- **并发安全**：DocumentRegistry、ChromaStore、PersistentBM25 均加线程锁保护写操作
 
 ### 系统架构（5 层）
 
 ```
-┌──────────────────────────────────────────────┐
-│  L1 用户交互层     文本 / 图片 输入           │
-│  L2 多模态预处理层  清洗、特征提取、OCR/Caption│
-│  L3 统一表征层     多模态嵌入 + 向量库        │
-│  L4 智能决策层     搜索Agent / 推理Agent /
-│                    反馈Agent (LangGraph)       │
-│  L5 结果输出层     行程生成 / 推荐            │
-└──────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────┐
+│  L1 用户交互层      文本 / 图片 输入                  │
+│  L2 多模态预处理层   PDF→图片→OCR→清洗→语义切分        │
+│  L3 统一表征层       BGE-M3 嵌入 + ChromaDB 向量库     │
+│  L4 智能决策层       Search/Evaluate/Rewrite/         │
+│                     Answer/Fallback (LangGraph)       │
+│  L5 结果输出层       答案生成 / 拒答兜底               │
+└────────────────────────────────────────────────────┘
 ```
 
-## 📂 项目结构
+### 检索架构（最终版）
+
+```
+用户问题
+   │
+   ├── BGE-M3 (SiliconFlow)  →  稠密向量 TOP 20  → 过滤 score < 0.5
+   ├── SQLite FTS5 BM25       →  关键词检索 TOP 20 → 过滤 score < 0.5
+   │
+   └── RRF 融合 → TOP 10
+        │
+        └── BGE-reranker-v2-m3 → TOP 5 → 过滤 score < 0.9 → 最终结果
+```
+
+## 项目结构
 
 ```
 Agentic-Multimodal-RAG/
-├── PROJECT.md                      # 项目管理文档（记忆中枢）
-├── 参考资料.txt                     # 技术调研与参考资源
-├── all_models.txt                  # 可用模型清单
-├── requirements.txt                # Python 依赖（待生成）
+├── README.md
+├── requirements.txt
 ├── .gitignore
 │
-├── data/
-│   └── raw/                        # 原始输入文件（PDF / TXT / 图片）
-│       └── sample.pdf              #   测试用示例 PDF（15 页旅游文档）
+├── outputs/                          # 持久化数据（默认 gitignore）
+│   ├── registry/documents.json       #   文档注册中心
+│   ├── chroma-travel/                #   ChromaDB 向量库
+│   ├── bm25/bm25_index.db            #   BM25 关键词索引（SQLite FTS5）
+│   └── parsed/                       #   OCR 解析结果
 │
-├── outputs/                        # 生成结果目录
-│   ├── logs/                       #   运行日志 / 测试报告
-│   ├── ocr_results/                #   OCR 原始输出
-│   └── parsed/                     #   解析后的 Markdown / 对比报告
-│       └── pages/                  #     PDF 页面 PNG 切片
+├── src/
+│   ├── parsers/                      # 文档解析
+│   │   ├── pdf_to_images.py          #   PDF → PNG
+│   │   ├── ocr_to_markdown.py        #   qwen-ocr
+│   │   ├── paddleocr_vl.py           #   PaddleOCR-VL 备用
+│   │   ├── unified_parser.py         #   统一接口
+│   │   └── markdown_cleaner.py       #   清洗
+│   │
+│   ├── loaders/document_loader.py    # 多格式加载器
+│   ├── cleaning/universal_cleaner.py # 通用文本清洗
+│   ├── chunking/splitter.py          # 语义分块
+│   │
+│   ├── processing/
+│   │   ├── document_registry.py      #   文档注册中心（线程安全 + MD5 + 版本管理）
+│   │   └── pipeline.py               #   入库编排器
+│   │
+│   ├── embedding/embedder.py         # BGE-M3 embedding
+│   ├── vectorstore/chroma_store.py   # ChromaDB 封装（线程安全）
+│   │
+│   ├── retrieval/                    # 检索层
+│   │   ├── engine.py                 #   RetrievalEngine 统一入口
+│   │   ├── config.py                 #   阈值配置
+│   │   ├── dense_retriever.py        #   稠密检索
+│   │   ├── persistent_bm25.py        #   SQLite FTS5 BM25（线程安全）
+│   │   ├── hybrid_retriever.py       #   RRF 融合 + 重排序
+│   │   └── reranker.py               #   BGE-reranker
+│   │
+│   └── agent/                        # LangGraph Agent
+│       ├── graph.py                  #   状态机构建
+│       ├── state.py                  #   AgentState 定义
+│       ├── tools.py                  #   5 个节点 + 路由
+│       └── llm.py                    #   多后端 LLM 服务（快/默认/强模型）
 │
-├── src/                            # 核心源代码
-│   ├── __init__.py
-│   │
-│   ├── parsers/                    # 文档解析模块
-│   │   ├── __init__.py             #   统一导出
-│   │   ├── pdf_to_images.py        #   A2-Step1: PyMuPDF PDF→图片
-│   │   ├── ocr_to_markdown.py      #   A2-Step2: qwen3.5-ocr 图片→Markdown
-│   │   ├── unified_parser.py       #   A3: OCR 引擎统一接口（auto/qwen/paddle_vl）
-│   │   ├── paddleocr_vl.py         #   PaddleOCR-VL-1.6 异步 PDF 解析
-│   │   ├── pp_ocrv6.py             #   ❌ PP-OCRv6（已弃用，结构不兼容）
-│   │   └── markdown_cleaner.py     #   A3: Markdown 噪音清洗（分页标记/页码）
-│   │
-│   ├── loaders/                    # 文档加载模块
-│   │   ├── __init__.py
-│   │   └── document_loader.py      #   B1: 多格式统一加载器（PDF/MD/TXT）
-│   │
-│   ├── cleaning/                   # 通用清洗模块
-│   │   ├── __init__.py
-│   │   └── universal_cleaner.py    #   B1: 通用文本清洗（BOM/零宽/控制字符）
-│   │
-│   ├── chunking/                   # 语义切分（B2，待开发）
-│   ├── processing/                 # 批量处理流水线（B2-B3，待开发）
-│   └── agent/                      # LangGraph Agent 编排（D 系列，待开发）
-│
-└── tests/                          # 测试与冒烟脚本
-    ├── smoke_llm.py                #   LLM 连通性测试（qwen3.7-max）
-    ├── smoke_llm_fast.py           #   LLM 连通性测试（qwen3.6-flash）
-    ├── smoke_ocr.py                #   OCR 连通性测试（qwen3.5-ocr）
-    ├── smoke_baidu_ocr.py          #   百度 PaddleOCR-VL 连通性测试
-    ├── smoke_paddle_ocr.py         #   PaddleOCR 本地（已弃用）
-    ├── test_iter_A2.py             #   A2 管线端到端测试（15 页 PDF）
-    ├── test_iter_A3.py             #   A3 统一解析器测试
-    ├── test_iter_A3_zerocost.py    #   A3 零消耗测试（本地缓存）
-    ├── test_iter_B1.py             #   B1 多格式加载器测试（6 项验收）
-    ├── test_universal_cleaner.py   #   B1 通用清洗测试（8 项+性能）
-    ├── test_paddleocr_vl_vs_qwen.py#   OCR 引擎对比测试
-    ├── test_pp_ocrv6_vs_qwen.py    #   ❌ PP-OCRv6 对比（已弃用）
-    ├── ocr-example.txt             #   OCR 输出示例
-    └── pp-ocrv6.txt                #   PP-OCRv6 输出示例
+└── tests/                            # 各迭代测试脚本
+    ├── test_engine_smoke.py          #   检索引擎端到端冒烟
+    ├── test_bm25_deprecate.py        #   BM25 分词 + deprecate
+    └── test_agent_*.py               #   Agent 单测 / mock / e2e
 ```
 
-## 🛠️ 技术栈
+## 技术栈
 
 | 组件 | 选型 | 说明 |
 |------|------|------|
-| **Python** | 3.10 | PaddleOCR 兼容性最佳 |
-| **PDF→图片** | PyMuPDF (fitz) | 本地轻量，dpi=200 |
-| **OCR 引擎（主）** | qwen3.5-ocr（百炼 API） | 4.12s/页，中文高准确率 |
-| **OCR 引擎（备）** | PaddleOCR-VL-1.6（百度） | 统一接口可切换 |
-| **Embedding** | BGE-large-zh-v1.5 / 硅基流动 BGE-M3 | 中文效果好 |
-| **向量库** | Chroma / FAISS | 起步轻量 |
-| **LLM** | DeepSeek-V3 / Qwen2.5 | 高性价比 |
+| **Python** | 3.10 | PaddleOCR 兼容 |
+| **PDF→图片** | PyMuPDF (fitz) | 本地轻量 |
+| **OCR（主）** | qwen-ocr（阿里云百炼 API） | 直接输出 Markdown |
+| **OCR（备）** | PaddleOCR-VL（百度） | 统一接口可切换 |
+| **Embedding** | BGE-M3（SiliconFlow API） | 中文最优，1024 维 |
+| **向量库** | ChromaDB | 轻量持久化，metadata 过滤 |
+| **关键词检索** | SQLite FTS5 BM25 | **持久化**、零依赖、增量更新 |
+| **融合算法** | RRF（Reciprocal Rank Fusion） | 不依赖分数归一化 |
+| **重排序** | BGE-reranker-v2-m3（SiliconFlow API） | 精度提升关键，阈值 0.9 |
 | **Agent 框架** | LangGraph | 支持循环 + 状态机 |
+| **LLM** | qwen / deepseek（DashScope，可配置） | 快/默认/强三档分工 |
 
-## 🚦 当前进展
+## 当前进展
 
-### ✅ 已完成
+### 已完成
 
-| 迭代 | 模块 | 状态 | 说明 |
-|------|------|------|------|
-| **A1** | 基线流水线 | ✅ 通过 | PDF→图片→OCR→Markdown |
-| **A2** | 端到端管线 | ✅ 通过 | 15 页 PDF，31.38s，322 行 Markdown |
-| **A3** | 统一解析器 | ✅ 通过 | 双 OCR 引擎统一接口 + Markdown 清洗 |
-| **B1** | 加载器 + 清洗 | ✅ 通过 | 多格式加载器 + 通用清洗（6+8 项验收） |
+| 模块 | 状态 |
+|------|------|
+| PDF 解析管线（PDF→图片→OCR→Markdown） | ✅ |
+| 多格式加载器 + 通用清洗 + 语义分块 | ✅ |
+| 文档注册中心（MD5 检测 + 版本管理 + 线程锁） | ✅ |
+| ChromaDB 向量库封装（状态过滤 + 版本 deprecate + 线程锁） | ✅ |
+| PersistentBM25（SQLite FTS5 + 单字分词 + deprecate + 线程锁） | ✅ |
+| RRF 融合 + BGE-reranker 重排序 | ✅ |
+| RetrievalEngine 统一入口（全链路持久化） | ✅ |
+| 阈值调优（dense/bm25 0.5、rerank 0.9） | ✅ 测试验证 |
+| LangGraph Agent（Search/Evaluate/Rewrite/Answer/Fallback） | ✅ |
+| 检索引擎端到端冒烟测试 | ✅ 通过 |
 
-### 🚧 待完成
+### 待完善
 
-| 迭代 | 模块 | 优先级 | 说明 |
-|------|------|--------|------|
-| **B2** | 语义切分 | ⬆️ 高 | MarkdownHeaderTextSplitter，按标题分级 200-500 字/chunk |
-| **B3** | 向量入库 | ⬆️ 高 | BGE Embedding + Chroma 向量库 |
-| **B4** | 检索测试 | ⬆️ 高 | 5 个旅游问题命中率验证 |
-| **C1/C2** | 多模态接口 | ➡️ 中 | 图片理解预留（等开通多模态模型） |
-| **D1-D5** | Agent 编排 | ➡️ 中 | LangGraph 决策/评分/改写/生成节点 |
-| **E1** | 端到端整合 | ➡️ 中 | 旅游助理 3 个验收用例 |
+| 模块 | 优先级 |
+|------|--------|
+| 多模态输入（图片 + 文本混合查询） | 高 |
+| 端到端 Agent 真实 API 回归 | 中 |
+| 批量入库整库攻略 PDF | 中 |
 
-### 📊 进度总览
-
-```
-文档解析 ████████████████░░░░ 70%
-文档加载 ████████████████░░░░ 70%
-语义切分 ██░░░░░░░░░░░░░░░░░░ 10%
-向量检索 ████░░░░░░░░░░░░░░░░ 20%
-Agent编排 ░░░░░░░░░░░░░░░░░░░░  0%
-端到端整合 ░░░░░░░░░░░░░░░░░░░░  0%
-```
-
-## 🔑 环境变量配置
+## 环境变量配置
 
 本项目使用环境变量管理 API 密钥，**不提交任何密钥到代码仓库**。
 
-### 必需环境变量
-
 | 环境变量 | 用途 | 获取方式 |
 |----------|------|---------|
-| `DASHSCOPE_API_KEY` | qwen3.5-ocr / LLM 调用（阿里云百炼平台） | 1. 访问 [阿里云百炼平台](https://bailian.console.aliyun.com/) |
-| | | 2. 登录后进入「模型广场」→「API-KEY 管理」 |
-| | | 3. 创建 API Key 并复制 |
-| `OCR-TOKEN` | PaddleOCR-VL-1.6 调用（百度 AI Studio） | 1. 访问 [AI Studio 模型库](https://aistudio.baidu.com) |
-| | | 2. 搜索 PaddleOCR-VL 模型 |
-| | | 3. 获取 Access Token |
+| `SILICONFLOW_API_KEY` | BGE-M3 Embedding + BGE-reranker-v2-m3 | [SiliconFlow 控制台](https://cloud.siliconflow.cn) |
+| `DASHSCOPE_API_KEY` | qwen-ocr + Agent LLM（阿里云百炼） | [百炼平台](https://bailian.console.aliyun.com/) |
+| `OCR-TOKEN` | PaddleOCR-VL（百度，可选） | [AI Studio](https://aistudio.baidu.com) |
+
+可选覆盖 Agent 模型（默认见下）：`AGENT_FAST_MODEL`、`AGENT_MODEL`、`AGENT_STRONG_MODEL`。
 
 ### 设置方式
 
-```bash
-# Windows PowerShell
-$env:DASHSCOPE_API_KEY="your-api-key-here"
-$env:OCR-TOKEN="your-ocr-token-here"
-
-# 或创建 .env 文件（不提交到 Git）
-echo DASHSCOPE_API_KEY=your-api-key-here >> .env
-echo OCR-TOKEN=your-ocr-token-here >> .env
+```powershell
+# Windows PowerShell（注意 User 级变量需显式传递给当前进程）
+$env:SILICONFLOW_API_KEY = [Environment]::GetEnvironmentVariable('SILICONFLOW_API_KEY','User')
+$env:DASHSCOPE_API_KEY   = [Environment]::GetEnvironmentVariable('DASHSCOPE_API_KEY','User')
 ```
 
-## 🚀 快速开始
+## 快速开始
 
 ```bash
-# 1. 创建虚拟环境
-python -m venv .venv
-.venv\Scripts\activate
-
-# 2. 安装依赖
+# 1. 安装依赖
 pip install -r requirements.txt
 
-# 3. 设置环境变量（见上表）
+# 2. 设置环境变量（见上）
 
-# 4. 解析 PDF 文档
-python -m src.parsers.unified_parser data/raw/sample.pdf
-
-# 5. 运行测试
-python tests/test_iter_A2.py
-python tests/test_iter_B1.py
+# 3. 一键入库 + 检索
+python -c "
+from src.retrieval.engine import RetrievalEngine
+engine = RetrievalEngine()
+engine.ingest('outputs/parsed/document.md')
+for r in engine.search('成都有什么美食推荐'):
+    print(f\"#{r['rank']} rerank={r.get('rerank_score',0):.4f} {r['document'][:60]}\")
+"
 ```
 
-## 🧪 测试指南
+### 跑测试
 
-```bash
-# 冒烟测试（连通性验证）
-python tests/smoke_ocr.py              # OCR 连通性
-python tests/smoke_llm.py              # LLM 连通性
-python tests/smoke_baidu_ocr.py        # 百度 OCR 连通性
-
-# 迭代验收测试
-python tests/test_iter_A2.py           # A2 管线
-python tests/test_iter_A3.py           # 统一解析器
-python tests/test_iter_A3_zerocost.py  # 零消耗模式
-python tests/test_iter_B1.py           # 多格式加载器
-python tests/test_universal_cleaner.py # 通用清洗器
-python tests/test_paddleocr_vl_vs_qwen.py # OCR 引擎对比
+```powershell
+$env:PYTHONIOENCODING='utf-8'              # 避免 GBK 控制台 emoji 报错
+python tests/test_engine_smoke.py          # 检索引擎端到端冒烟
+python tests/test_bm25_deprecate.py        # BM25 分词 + deprecate
 ```
 
-## 📄 许可
+## 工程亮点
+
+开发过程中沉淀了一份完整的工程踩坑记录（本地维护），涵盖以下有代表性的真实问题与权衡：
+
+- **OCR 引擎选型**：PP-OCRv6 / PaddleOCR-VL / qwen-ocr 三选一，最终选直接输出 Markdown 的 qwen-ocr。
+- **余弦距离 vs 余弦相似度**：命名混淆导致阈值判断方向反了，负相似度文档被误召回。
+- **BM25 持久化**：从纯内存（重启即丢）迁移到 SQLite FTS5，支持增量更新与版本 deprecate。
+- **BM25 列权重打分恒为 0**：误读 FTS5 `bm25()` 的列权重语义，把唯一索引列权重设成 0，端到端冒烟才暴露。
+- **检索组件线程安全**：最小必要加锁——只锁有竞争的写路径，不锁无状态转发层和读路径。
+- **检索阈值设计**：dense/bm25 0.5、rerank 0.9 两层过滤，逐步从 0.3 收紧到 0.9 并经测试验证。
+- **环境适配**：ChromaDB Windows 文件锁、PowerShell GBK 编码、用户级环境变量作用域。
+
+## 许可
 
 MIT

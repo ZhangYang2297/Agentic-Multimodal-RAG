@@ -1,0 +1,12 @@
+# ─── 核心依赖 ───
+langgraph==1.2.6          # Agent 状态机
+openai==2.43.0            # OpenAI 兼容客户端（SiliconFlow / DashScope）
+chromadb==1.5.9           # 向量库（持久化）
+PyMuPDF==1.27.2.3         # PDF → 图片（import fitz）
+jieba==0.42.1             # 中文分词（内存版 BM25 备用）
+requests==2.34.2          # HTTP（重排序 / OCR API）
+
+# ─── 说明 ───
+# 1. 持久化 BM25 使用 Python 内置 sqlite3 的 FTS5，无需额外安装。
+# 2. Embedding / 重排序 / OCR / LLM 均走 HTTP API，不在本地加载大模型。
+# 3. PaddleOCR-VL 为可选备用引擎，按需自行安装（paddlepaddle / paddleocr）。
